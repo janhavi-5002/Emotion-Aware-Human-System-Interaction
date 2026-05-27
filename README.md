@@ -264,7 +264,12 @@ Emotion_hack/
 
 ---
 
+## 👥 Team
 
+| Name | Role | GitHub |
+|------|------|--------|
+| Mohit | Team Lead & Integration | [@Mohit211205](https://github.com/Mohit211205) |
+| Janhavi | ML & Emotion Detection | [@janhavi-5002](https://github.com/janhavi-5002) |
 
 > **HCL IIT Hackathon 2026** — Problem Statement 9: Emotion-Aware Human-System Interaction
 

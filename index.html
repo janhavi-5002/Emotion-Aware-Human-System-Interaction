@@ -1,0 +1,218 @@
+cat > ~/emotion_project/index.html << 'HTMLEOF'
+<!DOCTYPE html>
+<html>
+<head>
+<title>Emotion-Aware Robot</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#0a0a0a; color:#fff; font-family:Arial; }
+.container { display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:16px; }
+.box { background:#111; border-radius:12px; padding:12px; }
+video { width:100%; border-radius:8px; }
+#emotion-badge { font-size:2.5rem; font-weight:bold; margin:8px 0; text-align:center; }
+.source-tag { font-size:0.75rem; padding:2px 8px; border-radius:10px; display:inline-block; margin:4px; }
+.face-tag { background:#1a3a2a; color:#00ff88; }
+.audio-tag { background:#1a1a3a; color:#4488ff; }
+.scores { display:flex; gap:12px; justify-content:center; margin:8px 0; font-size:0.85rem; color:#aaa; }
+#mic-btn { padding:10px 24px; border-radius:8px; border:none; cursor:pointer; font-size:1rem; margin-top:8px; width:100%; }
+#mic-btn.off { background:#222; color:#aaa; }
+#mic-btn.on  { background:#ff4444; color:#fff; }
+h3 { color:#aaa; font-size:0.8rem; margin-bottom:8px; text-transform:uppercase; letter-spacing:1px; }
+#timeline-box { grid-column:1/3; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="box">
+    <h3>Live Camera</h3>
+    <video id="video" autoplay muted></video>
+    <button id="mic-btn" class="off" onclick="toggleMic()">🎤 Enable Microphone</button>
+  </div>
+
+  <div class="box" style="display:flex;flex-direction:column;align-items:center;justify-content:center;">
+    <h3>Robot Response</h3>
+    <canvas id="robot" width="280" height="320"></canvas>
+    <div id="emotion-badge">😐 neutral</div>
+    <div class="scores">
+      <span>👁 Face: <span id="face-val">-</span></span>
+      <span>🎤 Audio: <span id="audio-val">-</span></span>
+    </div>
+    <div>
+      Source: <span id="source-tag" class="source-tag face-tag">face</span>
+    </div>
+  </div>
+
+  <div class="box" id="timeline-box">
+    <h3>Emotion Timeline</h3>
+    <canvas id="timeline" height="70"></canvas>
+  </div>
+</div>
+
+<script>
+const SERVER = 'ws://' + location.hostname + ':8000/ws';
+const COLORS = {happy:'#00ff88',sad:'#4488ff',angry:'#ff4444',fear:'#ff8800',surprise:'#ffff00',disgust:'#aa44ff',neutral:'#555'};
+const EMOJI  = {happy:'😊',sad:'😢',angry:'😠',fear:'😨',surprise:'😲',disgust:'🤢',neutral:'😐'};
+
+let ws, currentEmotion='neutral', currentColor='#555', animFrame=0;
+let micStream=null, audioCtx=null, micOn=false;
+let latestAudioB64 = null;
+
+// Webcam
+navigator.mediaDevices.getUserMedia({video:true}).then(stream => {
+  document.getElementById('video').srcObject = stream;
+});
+
+// Mic toggle
+async function toggleMic() {
+  if (!micOn) {
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({audio:true});
+      audioCtx = new AudioContext({sampleRate:16000});
+      const source = audioCtx.createMediaStreamSource(micStream);
+      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      let audioBuffer = [];
+      processor.onaudioprocess = e => {
+        const data = e.inputBuffer.getChannelData(0);
+        audioBuffer.push(...data);
+        if (audioBuffer.length >= 16000) {
+          const arr = new Float32Array(audioBuffer.splice(0, 16000));
+          const bytes = new Uint8Array(arr.buffer);
+          latestAudioB64 = btoa(String.fromCharCode(...bytes));
+        }
+      };
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+      micOn = true;
+      document.getElementById('mic-btn').className = 'on';
+      document.getElementById('mic-btn').textContent = '🎤 Mic ON — Click to Stop';
+    } catch(e) { alert('Mic access denied: ' + e); }
+  } else {
+    micStream.getTracks().forEach(t => t.stop());
+    audioCtx.close();
+    micOn = false; latestAudioB64 = null;
+    document.getElementById('mic-btn').className = 'off';
+    document.getElementById('mic-btn').textContent = '🎤 Enable Microphone';
+  }
+}
+
+// WebSocket
+function connect() {
+  ws = new WebSocket(SERVER);
+  ws.onmessage = e => {
+    const d = JSON.parse(e.data);
+    currentEmotion = d.emotion;
+    currentColor = d.behavior.color;
+    document.getElementById('emotion-badge').textContent = (EMOJI[d.emotion]||'😐') + ' ' + d.emotion;
+    document.getElementById('face-val').textContent = d.face_emotion + ' ' + d.face_conf.toFixed(0) + '%';
+    document.getElementById('audio-val').textContent = d.audio_emotion + ' ' + d.audio_conf.toFixed(0) + '%';
+    const st = document.getElementById('source-tag');
+    st.textContent = d.source;
+    st.className = 'source-tag ' + (d.source==='audio' ? 'audio-tag' : 'face-tag');
+    drawTimeline(d.log);
+  };
+  ws.onclose = () => setTimeout(connect, 2000);
+}
+connect();
+
+// Send frames + audio every 1.5s
+const video = document.getElementById('video');
+const offscreen = document.createElement('canvas');
+offscreen.width=320; offscreen.height=240;
+setInterval(() => {
+  if (ws && ws.readyState===1 && video.readyState===4) {
+    offscreen.getContext('2d').drawImage(video,0,0,320,240);
+    ws.send(JSON.stringify({
+      frame: offscreen.toDataURL('image/jpeg', 0.7),
+      audio: latestAudioB64
+    }));
+  }
+}, 1500);
+
+// Robot drawing
+const rc = document.getElementById('robot').getContext('2d');
+function drawRobot() {
+  animFrame++;
+  rc.clearRect(0,0,280,320);
+  const e = currentEmotion, c = currentColor;
+  const bob = Math.sin(animFrame*0.06) * (e==='happy'?7:2);
+  const lean = e==='sad'?10 : e==='angry'?-6 : e==='fear'?5 : 0;
+  rc.save();
+  rc.translate(140, 160+bob);
+  rc.rotate(lean*Math.PI/180);
+
+  // Body
+  rc.fillStyle = c+'22'; rc.strokeStyle = c; rc.lineWidth=2;
+  rc.beginPath(); rc.roundRect(-32,8,64,75,10); rc.fill(); rc.stroke();
+
+  // Head
+  rc.beginPath(); rc.roundRect(-28,-58,56,52,12); rc.fill(); rc.stroke();
+
+  // Eyes
+  rc.fillStyle = c;
+  if(e==='angry'){
+    rc.fillRect(-20,-36,14,5); rc.fillRect(6,-36,14,5);
+  } else if(e==='surprise'){
+    rc.beginPath(); rc.arc(-13,-34,9,0,Math.PI*2); rc.fill();
+    rc.beginPath(); rc.arc(13,-34,9,0,Math.PI*2); rc.fill();
+  } else {
+    rc.beginPath(); rc.arc(-13,-34,7,0,Math.PI*2); rc.fill();
+    rc.beginPath(); rc.arc(13,-34,7,0,Math.PI*2); rc.fill();
+  }
+
+  // Mouth
+  rc.beginPath(); rc.strokeStyle=c; rc.lineWidth=3;
+  if(e==='happy')        { rc.arc(0,-18,14,0.15,Math.PI-0.15); }
+  else if(e==='sad')     { rc.arc(0,-6,14,Math.PI+0.15,2*Math.PI-0.15); }
+  else if(e==='surprise'){ rc.arc(0,-15,9,0,Math.PI*2); }
+  else if(e==='angry')   { rc.moveTo(-12,-14); rc.lineTo(12,-14); }
+  else                   { rc.moveTo(-10,-16); rc.lineTo(10,-16); }
+  rc.stroke();
+
+  // Arms
+  rc.lineWidth=5; rc.lineCap='round';
+  if(e==='happy'){
+    rc.beginPath(); rc.moveTo(-32,25); rc.lineTo(-65,-5); rc.stroke();
+    rc.beginPath(); rc.moveTo(32,25);  rc.lineTo(65,-5);  rc.stroke();
+  } else if(e==='sad'){
+    rc.beginPath(); rc.moveTo(-32,25); rc.lineTo(-60,65); rc.stroke();
+    rc.beginPath(); rc.moveTo(32,25);  rc.lineTo(60,65);  rc.stroke();
+  } else if(e==='fear'){
+    rc.beginPath(); rc.moveTo(-32,25); rc.lineTo(-65,15); rc.stroke();
+    rc.beginPath(); rc.moveTo(32,25);  rc.lineTo(65,15);  rc.stroke();
+  } else {
+    rc.beginPath(); rc.moveTo(-32,25); rc.lineTo(-60,55); rc.stroke();
+    rc.beginPath(); rc.moveTo(32,25);  rc.lineTo(60,55);  rc.stroke();
+  }
+
+  // Legs
+  rc.lineWidth=6;
+  rc.beginPath(); rc.moveTo(-12,83); rc.lineTo(-16,130); rc.stroke();
+  rc.beginPath(); rc.moveTo(12,83);  rc.lineTo(16,130);  rc.stroke();
+
+  rc.restore();
+  requestAnimationFrame(drawRobot);
+}
+drawRobot();
+
+// Timeline
+function drawTimeline(log) {
+  const tc = document.getElementById('timeline').getContext('2d');
+  const W = document.getElementById('timeline').offsetWidth || 600;
+  document.getElementById('timeline').width = W;
+  tc.clearRect(0,0,W,70);
+  if(!log||log.length<2) return;
+  const step = W/log.length;
+  log.forEach((entry,i) => {
+    const col = COLORS[entry.emotion]||'#555';
+    tc.fillStyle = col+'44';
+    tc.fillRect(i*step, 0, step+1, 70);
+    tc.fillStyle = col;
+    const h = (entry.face_conf||50)*0.7;
+    tc.fillRect(i*step, 70-h, step+1, h);
+  });
+}
+</script>
+</body>
+</html>
+HTMLEOF
+echo "index.html updated!"
